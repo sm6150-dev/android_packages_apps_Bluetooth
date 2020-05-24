@@ -16,9 +16,12 @@
 
 package com.android.bluetooth.avrcpcontroller;
 
+import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothAvrcpController;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothProfile;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
 import android.content.Context;
 import android.content.Intent;
 import android.media.AudioManager;
@@ -48,11 +51,12 @@ import java.util.List;
  */
 class AvrcpControllerStateMachine extends StateMachine {
     static final String TAG = "AvrcpControllerStateMachine";
-    static final boolean DBG = Log.isLoggable(TAG, Log.DEBUG);
+    static final boolean DBG = true;
 
     //0->99 Events from Outside
     public static final int CONNECT = 1;
     public static final int DISCONNECT = 2;
+    public static final int MSG_DEVICE_UPDATED = 3;
 
     //100->199 Internal Events
     protected static final int CLEANUP = 100;
@@ -76,6 +80,7 @@ class AvrcpControllerStateMachine extends StateMachine {
     static final int MESSAGE_PROCESS_SET_ADDRESSED_PLAYER = 214;
     static final int MESSAGE_PROCESS_ADDRESSED_PLAYER_CHANGED = 215;
     static final int MESSAGE_PROCESS_NOW_PLAYING_CONTENTS_CHANGED = 216;
+    static final int MESSAGE_PROCESS_RC_FEATURES = 217;
 
     //300->399 Events for Browsing
     static final int MESSAGE_GET_FOLDER_ITEMS = 300;
@@ -99,21 +104,30 @@ class AvrcpControllerStateMachine extends StateMachine {
     private final boolean mIsVolumeFixed;
 
     protected final BluetoothDevice mDevice;
+    private BluetoothDevice mA2dpDevice = null;
     protected final byte[] mDeviceAddress;
     protected final AvrcpControllerService mService;
     protected final Disconnected mDisconnected;
     protected final Connecting mConnecting;
     protected final Connected mConnected;
     protected final Disconnecting mDisconnecting;
+    private A2dpSinkService mA2dpSinkService;
+
+    private static CoverArtUtils mCoveArtUtils;
+    private AvrcpControllerBipStateMachine mBipStateMachine;
 
     protected int mMostRecentState = BluetoothProfile.STATE_DISCONNECTED;
 
     boolean mRemoteControlConnected = false;
     boolean mBrowsingConnected = false;
     final BrowseTree mBrowseTree;
+    private boolean smActive = false;
     private AvrcpPlayer mAddressedPlayer = new AvrcpPlayer();
+    private RemoteDevice mRemoteDevice;
+    private int mPreviousPercentageVol = -1;
     private int mAddressedPlayerId = -1;
     private SparseArray<AvrcpPlayer> mAvailablePlayerList = new SparseArray<AvrcpPlayer>();
+    // Only accessed from State Machine processMessage
     private int mVolumeChangedNotificationsToIgnore = 0;
     private int mVolumeNotificationLabel = -1;
 
@@ -142,10 +156,19 @@ class AvrcpControllerStateMachine extends StateMachine {
         addState(mConnected);
         addState(mDisconnecting);
 
+        smActive = true;
         mGetFolderList = new GetFolderList();
         addState(mGetFolderList, mConnected);
+
+        mRemoteDevice = new RemoteDevice(device);
+
         mAudioManager = (AudioManager) service.getSystemService(Context.AUDIO_SERVICE);
         mIsVolumeFixed = mAudioManager.isVolumeFixed();
+        IntentFilter filter = new IntentFilter(AudioManager.VOLUME_CHANGED_ACTION);
+        mService.registerReceiver(mBroadcastReceiver, filter);
+
+        mCoveArtUtils = new CoverArtUtils();
+        mBipStateMachine = AvrcpControllerBipStateMachine.make(this, getHandler(), service);
 
         setInitialState(mDisconnected);
     }
@@ -214,7 +237,7 @@ class AvrcpControllerStateMachine extends StateMachine {
     }
 
     synchronized void onBrowsingConnected() {
-        if (mBrowsingConnected) return;
+        if (mBrowsingConnected || (!smActive)) return;
         mService.sBrowseTree.mRootNode.addChild(mBrowseTree.mRootNode);
         BluetoothMediaBrowserService.notifyChanged(mService
                 .sBrowseTree.mRootNode);
@@ -223,20 +246,23 @@ class AvrcpControllerStateMachine extends StateMachine {
     }
 
     synchronized void onBrowsingDisconnected() {
-        if (!mBrowsingConnected) return;
+        if (!mBrowsingConnected || (!smActive)) return;
         mAddressedPlayer.setPlayStatus(PlaybackState.STATE_ERROR);
         mAddressedPlayer.updateCurrentTrack(null);
-        mBrowseTree.mNowPlayingNode.setCached(false);
-        BluetoothMediaBrowserService.notifyChanged(mBrowseTree.mNowPlayingNode);
+        if (mBrowseTree != null && mBrowseTree.mNowPlayingNode != null) {
+            mBrowseTree.mNowPlayingNode.setCached(false);
+            BluetoothMediaBrowserService.notifyChanged(mBrowseTree.mNowPlayingNode);
+        }
         PlaybackState.Builder pbb = new PlaybackState.Builder();
         pbb.setState(PlaybackState.STATE_ERROR, PlaybackState.PLAYBACK_POSITION_UNKNOWN,
                 1.0f).setActions(0);
         pbb.setErrorMessage(mService.getString(R.string.bluetooth_disconnected));
         BluetoothMediaBrowserService.notifyChanged(pbb.build());
-        mService.sBrowseTree.mRootNode.removeChild(
-                mBrowseTree.mRootNode);
-        BluetoothMediaBrowserService.notifyChanged(mService
-                .sBrowseTree.mRootNode);
+        if (mBrowseTree != null && mBrowseTree.mRootNode != null) {
+            mService.sBrowseTree.mRootNode.removeChild(
+                     mBrowseTree.mRootNode);
+            BluetoothMediaBrowserService.notifyChanged(mService.sBrowseTree.mRootNode);
+        }
         BluetoothMediaBrowserService.trackChanged(null);
         mBrowsingConnected = false;
     }
@@ -263,6 +289,7 @@ class AvrcpControllerStateMachine extends StateMachine {
             if (mMostRecentState != BluetoothProfile.STATE_DISCONNECTED) {
                 sendMessage(CLEANUP);
             }
+            mA2dpDevice = null;
             broadcastConnectionStateChanged(BluetoothProfile.STATE_DISCONNECTED);
         }
 
@@ -275,6 +302,7 @@ class AvrcpControllerStateMachine extends StateMachine {
                     break;
                 case CLEANUP:
                     mService.removeStateMachine(AvrcpControllerStateMachine.this);
+                    doQuit();
                     break;
             }
             return true;
@@ -298,6 +326,9 @@ class AvrcpControllerStateMachine extends StateMachine {
         @Override
         public void enter() {
             if (mMostRecentState == BluetoothProfile.STATE_CONNECTING) {
+                BluetoothDevice device =
+                        BluetoothAdapter.getDefaultAdapter().getRemoteDevice(mDeviceAddress);
+                mA2dpDevice = device;
                 broadcastConnectionStateChanged(BluetoothProfile.STATE_CONNECTED);
                 BluetoothMediaBrowserService.addressedPlayerChanged(mSessionCallbacks);
             } else {
@@ -318,13 +349,6 @@ class AvrcpControllerStateMachine extends StateMachine {
                     setAbsVolume(msg.arg1, msg.arg2);
                     return true;
 
-                case MESSAGE_PROCESS_REGISTER_ABS_VOL_NOTIFICATION:
-                    mVolumeNotificationLabel = msg.arg1;
-                    mService.sendRegisterAbsVolRspNative(mDeviceAddress,
-                            NOTIFICATION_RSP_TYPE_INTERIM,
-                            getAbsVolumeResponse(), mVolumeNotificationLabel);
-                    return true;
-
                 case MESSAGE_GET_FOLDER_ITEMS:
                     transitionTo(mGetFolderList);
                     return true;
@@ -339,19 +363,28 @@ class AvrcpControllerStateMachine extends StateMachine {
                     return true;
 
                 case MESSAGE_PROCESS_TRACK_CHANGED:
-                    mAddressedPlayer.updateCurrentTrack((MediaMetadata) msg.obj);
-                    BluetoothMediaBrowserService.trackChanged((MediaMetadata) msg.obj);
+                    TrackInfo trackInfo = (TrackInfo)msg.obj;
+                    mAddressedPlayer.updateCurrentTrack((MediaMetadata) trackInfo.getMediaMetaData());
+                    BluetoothMediaBrowserService.trackChanged((MediaMetadata) trackInfo.getMediaMetaData());
+                    mAddressedPlayer.updateCurrentTrackInfo(trackInfo);
+                    mCoveArtUtils.msgTrackChanged(mService, mBipStateMachine,mAddressedPlayer,mRemoteDevice);
                     return true;
 
                 case MESSAGE_PROCESS_PLAY_STATUS_CHANGED:
-                    mAddressedPlayer.setPlayStatus(msg.arg1);
-                    BluetoothMediaBrowserService.notifyChanged(mAddressedPlayer.getPlaybackState());
-                    if (mAddressedPlayer.getPlaybackState().getState()
-                            == PlaybackState.STATE_PLAYING
-                            && A2dpSinkService.getFocusState() == AudioManager.AUDIOFOCUS_NONE
-                            && !shouldRequestFocus()) {
-                        sendMessage(MSG_AVRCP_PASSTHRU,
-                                AvrcpControllerService.PASS_THRU_CMD_ID_PAUSE);
+                     int status = msg.arg1;
+                     mAddressedPlayer.setPlayStatus(status);
+                     BluetoothMediaBrowserService.notifyChanged(mAddressedPlayer.getPlaybackState());
+                     broadcastPlayBackStateChanged(mAddressedPlayer.getPlaybackState());
+                     BluetoothDevice device = BluetoothAdapter.getDefaultAdapter().getRemoteDevice(mDeviceAddress);
+                     mA2dpSinkService = A2dpSinkService.getA2dpSinkService();
+                    if (mA2dpSinkService == null) {
+                        Log.e(TAG, "mA2dpSinkService is null, return");
+                    }
+                    if (status == PlaybackState.STATE_PLAYING) {
+                        mA2dpSinkService.informTGStatePlaying(device, true);
+                    } else if (status == PlaybackState.STATE_PAUSED
+                            || status == PlaybackState.STATE_STOPPED) {
+                        mA2dpSinkService.informTGStatePlaying(device, false);
                     }
                     return true;
 
@@ -382,6 +415,75 @@ class AvrcpControllerStateMachine extends StateMachine {
                     transitionTo(mDisconnecting);
                     return true;
 
+                case MSG_DEVICE_UPDATED:
+                    msgDeviceUpdated((BluetoothDevice)msg.obj);
+                    return true;
+
+                case MESSAGE_PROCESS_REGISTER_ABS_VOL_NOTIFICATION: {
+                    mVolumeNotificationLabel = msg.arg1;
+                    mRemoteDevice.setNotificationLabel(mVolumeNotificationLabel);
+                    mRemoteDevice.setAbsVolNotificationRequested(true);
+                    int percentageVol = getVolumePercentage();
+                    if (DBG) {
+                        Log.d(TAG, " Sending Interim Response = " + percentageVol + " label "
+                                + msg.arg1);
+                    }
+                    AvrcpControllerService.sendRegisterAbsVolRspNative(
+                            mRemoteDevice.getBluetoothAddress(), NOTIFICATION_RSP_TYPE_INTERIM,
+                            percentageVol, mRemoteDevice.getNotificationLabel());
+                    }
+                    return true;
+
+                case MESSAGE_PROCESS_VOLUME_CHANGED_NOTIFICATION: {
+                    if (mVolumeChangedNotificationsToIgnore > 0) {
+                        mVolumeChangedNotificationsToIgnore--;
+                        if (mVolumeChangedNotificationsToIgnore == 0) {
+                            removeMessages(MESSAGE_INTERNAL_ABS_VOL_TIMEOUT);
+                        }
+                    } else {
+                        if (mRemoteDevice.getAbsVolNotificationRequested()) {
+                            int percentageVol = getVolumePercentage();
+                            Log.d(TAG, " percentageVol = " + percentageVol);
+                            if (percentageVol != mPreviousPercentageVol) {
+                                if (DBG) {
+                                    Log.d(TAG, " Sending Changed Response = " + percentageVol +
+                                          " label: " + msg.arg1 + " mPreviousPercentageVol: " +
+                                          mPreviousPercentageVol);
+                                }
+                                AvrcpControllerService.sendRegisterAbsVolRspNative(
+                                        mRemoteDevice.getBluetoothAddress(),
+                                        NOTIFICATION_RSP_TYPE_CHANGED, percentageVol,
+                                        mRemoteDevice.getNotificationLabel());
+                                mPreviousPercentageVol = percentageVol;
+                                mRemoteDevice.setAbsVolNotificationRequested(false);
+                            }
+                        }
+                    }
+                    }
+                    return true;
+
+                case MESSAGE_INTERNAL_ABS_VOL_TIMEOUT:
+                    // Volume changed notifications should come back promptly from the
+                    // AudioManager, if for some reason some notifications were squashed don't
+                    // prevent future notifications.
+                    if (DBG) Log.d(TAG, "Timed out on volume changed notification");
+                    mVolumeChangedNotificationsToIgnore = 0;
+                    return true;
+
+                case MESSAGE_PROCESS_RC_FEATURES:
+                    mRemoteDevice.setRemoteFeatures(msg.arg1);
+                    if (msg.arg2 > 0) {
+                        mCoveArtUtils.msgProcessRcFeatures(mBipStateMachine, mRemoteDevice,msg.arg2);
+                    }
+                    return true;
+
+                case CoverArtUtils.MESSAGE_BIP_CONNECTED:
+                case CoverArtUtils.MESSAGE_BIP_DISCONNECTED:
+                case CoverArtUtils.MESSAGE_BIP_IMAGE_FETCHED:
+                case CoverArtUtils.MESSAGE_BIP_THUMB_NAIL_FETCHED:
+                    mCoveArtUtils.processBipAction(mService, mAddressedPlayer,
+                            mRemoteDevice, msg.what, msg);
+                    return true;
                 default:
                     return super.processMessage(msg);
             }
@@ -429,6 +531,28 @@ class AvrcpControllerStateMachine extends StateMachine {
                 mService.sendPassThroughCommandNative(mDeviceAddress,
                         cmd, AvrcpControllerService.KEY_STATE_RELEASED);
             }
+        }
+
+        private synchronized void msgDeviceUpdated(BluetoothDevice device) {
+            if (device != null && device.equals(mA2dpDevice)) {
+                return;
+            }
+            Log.d(TAG, "msgDeviceUpdated. Previous: " + mA2dpDevice + " New: " + device);
+            // We are connected to a new device via A2DP now.
+            mA2dpDevice = device;
+            Log.w(TAG, "mA2dpDevice: " + mA2dpDevice +
+                                      " mBrowsingConnected: " + mBrowsingConnected);
+            if (mBrowsingConnected) {
+                //To do
+                BluetoothMediaBrowserService.notifyChanged(mService.sBrowseTree.mRootNode);
+                //BluetoothMediaBrowserService.notifyChanged(BrowseTree.ROOT);
+            }
+
+            int Playstate = mAddressedPlayer.getPlayStatus();
+            MediaMetadata mediaMetadata = mAddressedPlayer.getCurrentTrack();
+            Log.d(TAG, "Media metadata " + mediaMetadata + " playback state " + Playstate);
+            mAddressedPlayer.setPlayStatus(Playstate);
+            mAddressedPlayer.updateCurrentTrack(mediaMetadata);
         }
 
         private boolean isHoldableKey(int cmd) {
@@ -594,15 +718,15 @@ class AvrcpControllerStateMachine extends StateMachine {
                     + ITEM_PAGE_SIZE) - 1;
             switch (target.getScope()) {
                 case AvrcpControllerService.BROWSE_SCOPE_PLAYER_LIST:
-                    mService.getPlayerListNative(mDeviceAddress,
+                    AvrcpControllerService.getPlayerListNative(mDeviceAddress,
                             start, end);
                     break;
                 case AvrcpControllerService.BROWSE_SCOPE_NOW_PLAYING:
-                    mService.getNowPlayingListNative(
+                    AvrcpControllerService.getNowPlayingListNative(
                             mDeviceAddress, start, end);
                     break;
                 case AvrcpControllerService.BROWSE_SCOPE_VFS:
-                    mService.getFolderListNative(mDeviceAddress,
+                    AvrcpControllerService.getFolderListNative(mDeviceAddress,
                             start, end);
                     break;
                 default:
@@ -636,7 +760,7 @@ class AvrcpControllerStateMachine extends StateMachine {
             } else if (mNextStep.isPlayer()) {
                 logD("NAVIGATING Player " + mNextStep.toString());
                 if (mNextStep.isBrowsable()) {
-                    mService.setBrowsedPlayerNative(
+                    AvrcpControllerService.setBrowsedPlayerNative(
                             mDeviceAddress, (int) mNextStep.getBluetoothID());
                 } else {
                     logD("Player doesn't support browsing");
@@ -648,14 +772,14 @@ class AvrcpControllerStateMachine extends StateMachine {
                 mNextStep = mBrowseTree.getCurrentBrowsedFolder().getParent();
                 mBrowseTree.getCurrentBrowsedFolder().setCached(false);
 
-                mService.changeFolderPathNative(
+                AvrcpControllerService.changeFolderPathNative(
                         mDeviceAddress,
                         AvrcpControllerService.FOLDER_NAVIGATION_DIRECTION_UP,
                         0);
 
             } else {
                 logD("NAVIGATING DOWN " + mNextStep.toString());
-                mService.changeFolderPathNative(
+                AvrcpControllerService.changeFolderPathNative(
                         mDeviceAddress,
                         AvrcpControllerService.FOLDER_NAVIGATION_DIRECTION_DOWN,
                         mNextStep.getBluetoothID());
@@ -679,10 +803,56 @@ class AvrcpControllerStateMachine extends StateMachine {
         }
     }
 
+    private final BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            Log.d(TAG, "onReceive(): action: " + action);
+            if (action.equals(AudioManager.VOLUME_CHANGED_ACTION)) {
+                int streamType = intent.getIntExtra(AudioManager.EXTRA_VOLUME_STREAM_TYPE, -1);
+                if (streamType == AudioManager.STREAM_MUSIC) {
+                    sendMessage(MESSAGE_PROCESS_VOLUME_CHANGED_NOTIFICATION);
+                }
+            }
+        }
+    };
+
+    void doQuit() {
+        Log.d(TAG, "doQuit()");
+        try {
+            mService.unregisterReceiver(mBroadcastReceiver);
+        } catch (IllegalArgumentException expected) {
+            // If the receiver was never registered unregister will throw an
+            // IllegalArgumentException.
+        }
+        synchronized(AvrcpControllerStateMachine.this) {
+            smActive = false;
+        }
+        // we should disacrd, all currently queuedup messages.
+        quitNow();
+    }
 
     private void setAbsVolume(int absVol, int label) {
         int maxVolume = mAudioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
         int currIndex = mAudioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+
+        /* If SetAbsVolume Control Cmd is received from non-Streaming device then the
+         * requested volume level will not be set fot rendering and current Abs vol level
+         *  at DUT (sink: rendering device) will be sent in response. */
+        Log.d(TAG, "Streaming device: " + A2dpSinkService.getCurrentStreamingDevice()
+                + " Device: " + mDevice + " absVol: " + absVol + " label: " + label);
+        if (!mDevice.equals(A2dpSinkService.getCurrentStreamingDevice())) {
+            absVol = (currIndex * ABS_VOL_BASE) / maxVolume;
+            Log.w(TAG, "Volume change request came from non-streaming device," +
+                    "respond with current absVol: " + absVol);
+            AvrcpControllerService.sendAbsVolRspNative(mRemoteDevice.getBluetoothAddress(), absVol,
+                label);
+            int percentageVol = getVolumePercentage();
+            AvrcpControllerService.sendRegisterAbsVolRspNative(mRemoteDevice.getBluetoothAddress(),
+                NOTIFICATION_RSP_TYPE_CHANGED, percentageVol, mRemoteDevice.getNotificationLabel());
+            mPreviousPercentageVol = percentageVol;
+            return;
+        }
         int newIndex = (maxVolume * absVol) / ABS_VOL_BASE;
         logD(" setAbsVolume =" + absVol + " maxVol = " + maxVolume
                 + " cur = " + currIndex + " new = " + newIndex);
@@ -695,17 +865,23 @@ class AvrcpControllerStateMachine extends StateMachine {
             mAudioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newIndex,
                     AudioManager.FLAG_SHOW_UI);
         }
-        mService.sendAbsVolRspNative(mDeviceAddress, getAbsVolumeResponse(), label);
+        AvrcpControllerService.sendAbsVolRspNative(mDeviceAddress, getAbsVolumeResponse(), label);
+    }
+
+    private int getVolumePercentage() {
+        int maxVolume = mAudioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+        int currIndex = mAudioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+        int percentageVol = ((currIndex * ABS_VOL_BASE) / maxVolume);
+        logD("maxVolume: " + maxVolume + " currIndex: " + currIndex +
+                                         " percentageVol: " + percentageVol);
+        return percentageVol;
     }
 
     private int getAbsVolumeResponse() {
         if (mIsVolumeFixed) {
             return ABS_VOL_BASE;
         }
-        int maxVolume = mAudioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-        int currIndex = mAudioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
-        int newIndex = (currIndex * ABS_VOL_BASE) / maxVolume;
-        return newIndex;
+        return getVolumePercentage();
     }
 
     MediaSession.Callback mSessionCallbacks = new MediaSession.Callback() {
@@ -800,6 +976,16 @@ class AvrcpControllerStateMachine extends StateMachine {
         mMostRecentState = currentState;
         mService.sendBroadcast(intent, ProfileService.BLUETOOTH_PERM);
     }
+
+    private void broadcastPlayBackStateChanged(PlaybackState state) {
+        Intent intent = new Intent(AvrcpControllerService.ACTION_TRACK_EVENT);
+        intent.putExtra(AvrcpControllerService.EXTRA_PLAYBACK, state);
+        if (DBG) {
+            Log.d(TAG, " broadcastPlayBackStateChanged = " + state.toString());
+        }
+        mService.sendBroadcast(intent, ProfileService.BLUETOOTH_PERM);
+    }
+
 
     private boolean shouldRequestFocus() {
         return mService.getResources()

@@ -58,10 +58,11 @@ public class BluetoothOppReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent.getAction();
-
+        if(D) Log.d(TAG, "Action :" + action);
+        if (action == null) return;
         if (action.equals(BluetoothDevicePicker.ACTION_DEVICE_SELECTED)) {
             BluetoothOppManager mOppManager = BluetoothOppManager.getInstance(context);
-
+            BluetoothOppManager.isReadyForFileSharing = false;
             BluetoothDevice remoteDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
 
             if (D) {
@@ -70,6 +71,7 @@ public class BluetoothOppReceiver extends BroadcastReceiver {
 
             if (remoteDevice == null) {
                 mOppManager.cleanUpSendingFileInfo();
+                BluetoothOppManager.isReadyForFileSharing = true;
                 return;
             }
             // Insert transfer session record to database
@@ -85,6 +87,7 @@ public class BluetoothOppReceiver extends BroadcastReceiver {
             } else {
                 toastMsg = context.getString(R.string.bt_toast_4, deviceName);
             }
+            BluetoothOppManager.isReadyForFileSharing = true;
             Toast.makeText(context, toastMsg, Toast.LENGTH_SHORT).show();
         } else if (action.equals(Constants.ACTION_INCOMING_FILE_CONFIRM)) {
             if (V) {

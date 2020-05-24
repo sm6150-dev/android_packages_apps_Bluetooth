@@ -18,7 +18,6 @@ package com.android.bluetooth.avrcpcontroller;
 
 import android.media.MediaMetadata;
 import android.media.browse.MediaBrowser.MediaItem;
-import android.media.session.MediaController;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Bundle;
@@ -46,7 +45,7 @@ import java.util.List;
  */
 public class BluetoothMediaBrowserService extends MediaBrowserService {
     private static final String TAG = "BluetoothMediaBrowserService";
-    private static final boolean DBG = Log.isLoggable(TAG, Log.DEBUG);
+    private static final boolean DBG = true;
 
     private static BluetoothMediaBrowserService sBluetoothMediaBrowserService;
 
@@ -54,6 +53,7 @@ public class BluetoothMediaBrowserService extends MediaBrowserService {
 
     // Browsing related structures.
     private List<MediaSession.QueueItem> mMediaQueue = new ArrayList<>();
+
 
     /**
      * Initialize this BluetoothMediaBrowserService, creating our MediaSession, MediaPlayer and
@@ -188,18 +188,6 @@ public class BluetoothMediaBrowserService extends MediaBrowserService {
             }
         }
         return PlaybackState.STATE_ERROR;
-    }
-
-    /**
-     * Get object for controlling playback
-     */
-    public static synchronized MediaController.TransportControls getTransportControls() {
-        if (sBluetoothMediaBrowserService != null) {
-            return sBluetoothMediaBrowserService.mSession.getController().getTransportControls();
-        } else {
-            Log.w(TAG, "transportControls Unavailable");
-            return null;
-        }
     }
 
     /**

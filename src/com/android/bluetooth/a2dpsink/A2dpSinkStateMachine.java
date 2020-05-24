@@ -16,13 +16,14 @@
 package com.android.bluetooth.a2dpsink;
 
 import static android.bluetooth.BluetoothProfile.PRIORITY_OFF;
-
+import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothA2dpSink;
 import android.bluetooth.BluetoothAudioConfig;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothProfile;
 import android.content.Intent;
 import android.media.AudioFormat;
+import android.media.AudioSystem;
 import android.os.Message;
 import android.util.Log;
 
@@ -36,7 +37,7 @@ import com.android.internal.util.StateMachine;
 
 public class A2dpSinkStateMachine extends StateMachine {
     static final String TAG = "A2DPSinkStateMachine";
-    static final boolean DBG = Log.isLoggable(TAG, Log.DEBUG);
+    static final boolean DBG = true;
 
     //0->99 Events from Outside
     public static final int CONNECT = 1;
@@ -45,6 +46,7 @@ public class A2dpSinkStateMachine extends StateMachine {
     //100->199 Internal Events
     protected static final int CLEANUP = 100;
     private static final int CONNECT_TIMEOUT = 101;
+    private static final String BT_ADDR_KEY = "bt_addr";
 
     //200->299 Events from Native
     static final int STACK_EVENT = 200;
@@ -58,6 +60,7 @@ public class A2dpSinkStateMachine extends StateMachine {
     protected final Connecting mConnecting;
     protected final Connected mConnected;
     protected final Disconnecting mDisconnecting;
+    private BluetoothAdapter mAdapter;
 
     protected int mMostRecentState = BluetoothProfile.STATE_DISCONNECTED;
     protected BluetoothAudioConfig mAudioConfig = null;
@@ -73,11 +76,18 @@ public class A2dpSinkStateMachine extends StateMachine {
         mConnecting = new Connecting();
         mConnected = new Connected();
         mDisconnecting = new Disconnecting();
+        mAdapter = BluetoothAdapter.getDefaultAdapter();
 
         addState(mDisconnected);
         addState(mConnecting);
         addState(mConnected);
         addState(mDisconnecting);
+
+        if (mAdapter != null) {
+            String bdAddr = mAdapter.getAddress();
+            AudioSystem.setParameters(BT_ADDR_KEY + "=" + bdAddr);
+            Log.e(TAG, "AudioSystem.setParameters, Key: " + BT_ADDR_KEY + " Value: " + bdAddr);
+        }
 
         setInitialState(mDisconnected);
     }

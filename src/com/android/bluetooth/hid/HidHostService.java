@@ -26,7 +26,6 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.UserHandle;
 import android.util.Log;
-
 import androidx.annotation.VisibleForTesting;
 
 import com.android.bluetooth.BluetoothMetricsProto;
@@ -47,7 +46,7 @@ import java.util.Map;
  * @hide
  */
 public class HidHostService extends ProfileService {
-    private static final boolean DBG = false;
+    private static final boolean DBG = true;
     private static final String TAG = "BluetoothHidHostService";
 
     private Map<BluetoothDevice, Integer> mInputDevices;
@@ -181,7 +180,11 @@ public class HidHostService extends ProfileService {
                         if (DBG) {
                             Log.d(TAG, "Incoming HID connection rejected");
                         }
-                        virtualUnPlugNative(Utils.getByteAddress(device));
+                        if (disconnectRemote(device)) {
+                            disconnectHidNative(Utils.getByteAddress(device));
+                        } else {
+                            virtualUnPlugNative(Utils.getByteAddress(device));
+                        }
                     } else {
                         broadcastConnectionState(device, convertHalState(halState));
                     }
@@ -815,9 +818,10 @@ public class HidHostService extends ProfileService {
         // Check priority and accept or reject the connection.
         int priority = getPriority(device);
         int bondState = adapterService.getBondState(device);
-        // Allow this connection only if the device is bonded. Any attempt to connect while
-        // bonding would potentially lead to an unauthorized connection.
-        if (bondState != BluetoothDevice.BOND_BONDED) {
+        // During reconnection bond state may moved to bonding if remote missed key due to collision
+        // Also stack accepts the connection after authentication complete.
+        // Allow the connection in bonding and bonded states
+        if (bondState == BluetoothDevice.BOND_NONE) {
             Log.w(TAG, "okToConnect: return false, bondState=" + bondState);
             return false;
         } else if (priority != BluetoothProfile.PRIORITY_UNDEFINED
@@ -828,6 +832,37 @@ public class HidHostService extends ProfileService {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Check whether need to disconnect or virtual unplug remote device
+     * The check considers a number of factors during the evaluation.
+     *
+     * @param device the peer device to connect to
+     * @return true if remote device is to be disconnected, otherwise remote
+     * device needs to be virtually unplugged
+     */
+    private boolean disconnectRemote(BluetoothDevice device) {
+        AdapterService adapterService = AdapterService.getAdapterService();
+        // Check if adapter service is null.
+        if (adapterService == null) {
+            Log.w(TAG, "disconnectRemote: adapter service is null");
+            return false;
+        }
+        // Check if this is an incoming connection in Quiet mode.
+        if (adapterService.isQuietModeEnabled() && mTargetDevice == null) {
+            Log.w(TAG, "disconnectRemote: return false as quiet mode enabled");
+            return false;
+        }
+        int priority = getPriority(device);
+        int bondState = adapterService.getBondState(device);
+        // Disconnect remote device if bonded and priroty is OFF
+        if (bondState == BluetoothDevice.BOND_BONDED &&
+                priority == BluetoothProfile.PRIORITY_OFF) {
+            Log.w(TAG, "disconnectRemote: return true");
+            return true;
+        }
+        return false;
     }
 
     private static int convertHalState(int halState) {

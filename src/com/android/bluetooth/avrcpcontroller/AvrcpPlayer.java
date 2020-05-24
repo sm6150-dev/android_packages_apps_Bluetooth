@@ -28,7 +28,7 @@ import java.util.Arrays;
  */
 class AvrcpPlayer {
     private static final String TAG = "AvrcpPlayer";
-    private static final boolean DBG = Log.isLoggable(TAG, Log.DEBUG);
+    private static final boolean DBG = true;
 
     public static final int INVALID_ID = -1;
 
@@ -52,6 +52,8 @@ class AvrcpPlayer {
     private long mAvailableActions;
     private MediaMetadata mCurrentTrack;
     private PlaybackState mPlaybackState;
+
+    private TrackInfo mCurrentTrackInfo = new TrackInfo();
 
     AvrcpPlayer() {
         mId = INVALID_ID;
@@ -174,5 +176,13 @@ class AvrcpPlayer {
             mAvailableActions = mAvailableActions | PlaybackState.ACTION_SKIP_TO_PREVIOUS;
         }
         if (DBG) Log.d(TAG, "Supported Actions = " + mAvailableActions);
+    }
+
+    public synchronized void updateCurrentTrackInfo(TrackInfo update) {
+        mCurrentTrackInfo = update;
+    }
+
+    public synchronized TrackInfo getCurrentTrackInfo() {
+        return mCurrentTrackInfo;
     }
 }

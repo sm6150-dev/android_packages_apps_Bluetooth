@@ -12,12 +12,18 @@ include $(BUILD_STATIC_JAVA_LIBRARY)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE_TAGS := optional
-LOCAL_SRC_FILES := $(call all-java-files-under, src)
+
+LOCAL_SRC_FILES := \
+        $(call all-java-files-under, src) \
+        $(call all-java-files-under, ../../../vendor/qcom/opensource/bluetooth_ext/packages_apps_bluetooth_ext/src) \
+        $(call all-java-files-under, ../../../vendor/qcom/opensource/commonsys/bluetooth_ext/packages_apps_bluetooth_ext/src)
+
 LOCAL_PACKAGE_NAME := Bluetooth
 LOCAL_PRIVATE_PLATFORM_APIS := true
 LOCAL_CERTIFICATE := platform
 LOCAL_USE_AAPT2 := true
 LOCAL_JNI_SHARED_LIBRARIES := libbluetooth_jni
+
 LOCAL_JAVA_LIBRARIES := javax.obex telephony-common services.net
 LOCAL_STATIC_JAVA_LIBRARIES := \
         com.android.vcard \
@@ -49,6 +55,9 @@ LOCAL_ANNOTATION_PROCESSORS := \
 
 LOCAL_ANNOTATION_PROCESSOR_CLASSES := \
         androidx.room.RoomProcessor
+
+LOCAL_STATIC_JAVA_LIBRARIES += com.android.emailcommon
+LOCAL_PROTOC_OPTIMIZE_TYPE := micro
 
 LOCAL_REQUIRED_MODULES := libbluetooth
 LOCAL_PROGUARD_ENABLED := disabled

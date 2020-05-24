@@ -61,7 +61,7 @@ import java.util.regex.Pattern;
  * selection dialog.
  */
 public class BluetoothOppLauncherActivity extends Activity {
-    private static final String TAG = "BluetoothLauncherActivity";
+    private static final String TAG = "BluetoothOppLauncherActivity";
     private static final boolean D = Constants.DEBUG;
     private static final boolean V = Constants.VERBOSE;
 
@@ -98,6 +98,17 @@ public class BluetoothOppLauncherActivity extends Activity {
                 finish();
                 return;
             }
+
+            if (!BluetoothOppManager.isReadyForFileSharing) {
+                Log.i(TAG, " File share already in process, retrun with out any action ");
+                finish();
+                return;
+            }
+            /*
+             * SECURITY_EXCEPTION Google Photo grant-uri-permission
+             */
+            BTOppUtils.grantPermissionToUri(getApplicationContext(),
+                    intent.getClipData());
 
             /*
              * Other application is trying to share a file via Bluetooth,
@@ -170,6 +181,7 @@ public class BluetoothOppLauncherActivity extends Activity {
                         @Override
                         public void run() {
                             try {
+                                BluetoothOppManager.isReadyForFileSharing = false;
                                 BluetoothOppManager.getInstance(BluetoothOppLauncherActivity.this)
                                         .saveSendingFileInfo(mimeType, uris, false /* isHandover */,
                                                 true /* fromExternal */);
@@ -178,7 +190,8 @@ public class BluetoothOppLauncherActivity extends Activity {
                                 launchDevicePicker();
                                 finish();
                             } catch (IllegalArgumentException exception) {
-                                showToast(exception.getMessage());
+                                Log.e(TAG, "SEND_MULTIPLE :" +exception.getMessage());
+                                BluetoothOppManager.isReadyForFileSharing = true;
                                 finish();
                             }
                         }
@@ -241,6 +254,7 @@ public class BluetoothOppLauncherActivity extends Activity {
             }
             startActivity(in1);
         }
+        BluetoothOppManager.isReadyForFileSharing = true;
     }
 
     /* Returns true if Bluetooth is allowed given current airplane mode settings. */
@@ -259,7 +273,7 @@ public class BluetoothOppLauncherActivity extends Activity {
                 Settings.System.getString(resolver, Settings.Global.AIRPLANE_MODE_RADIOS);
         final boolean isAirplaneSensitive =
                 airplaneModeRadios == null || airplaneModeRadios.contains(
-                        Settings.System.RADIO_BLUETOOTH);
+                        Settings.Global.RADIO_BLUETOOTH);
         if (!isAirplaneSensitive) {
             return true;
         }
@@ -414,12 +428,14 @@ public class BluetoothOppLauncherActivity extends Activity {
             boolean fromExternal) {
         BluetoothOppManager manager = BluetoothOppManager.getInstance(getApplicationContext());
         try {
+            BluetoothOppManager.isReadyForFileSharing = false;
             manager.saveSendingFileInfo(mimeType, uriString, isHandover, fromExternal);
             launchDevicePicker();
             finish();
         } catch (IllegalArgumentException exception) {
-            showToast(exception.getMessage());
+            Log.e(TAG, "sendFileInfo :" + exception.getMessage());
             finish();
+            BluetoothOppManager.isReadyForFileSharing = true;
         }
     }
 

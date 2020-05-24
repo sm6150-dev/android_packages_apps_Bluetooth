@@ -56,7 +56,7 @@ import java.util.List;
  */
 public class A2dpSinkStreamHandler extends Handler {
     private static final String TAG = "A2dpSinkStreamHandler";
-    private static final boolean DBG = Log.isLoggable(TAG, Log.DEBUG);
+    private static final boolean DBG = true;
 
     // Configuration Variables
     private static final int DEFAULT_DUCK_PERCENT = 25;
@@ -73,6 +73,7 @@ public class A2dpSinkStreamHandler extends Handler {
     public static final int AUDIO_FOCUS_CHANGE = 7; // Audio focus callback with associated change
     public static final int REQUEST_FOCUS = 8; // Request focus when the media service is active
     public static final int DELAYED_PAUSE = 9; // If a call just started allow stack time to settle
+    public static final int RELEASE_FOCUS = 10;
 
     // Used to indicate focus lost
     private static final int STATE_FOCUS_LOST = 0;
@@ -140,8 +141,15 @@ public class A2dpSinkStreamHandler extends Handler {
         switch (message.what) {
             case SRC_STR_START:
                 mStreamAvailable = true;
+                Log.d(TAG, " isTvDevice =  " + isTvDevice() +
+                          "shouldRequestFocus = " + shouldRequestFocus());
                 if (isTvDevice() || shouldRequestFocus()) {
                     requestAudioFocusIfNone();
+                }
+
+                // Audio stream has started, stop it if we don't have focus.
+                if (mAudioFocus == AudioManager.AUDIOFOCUS_NONE) {
+                    requestAudioFocus();
                 }
                 break;
 
@@ -166,6 +174,11 @@ public class A2dpSinkStreamHandler extends Handler {
                     requestAudioFocusIfNone();
                     break;
                 }
+
+                // Audio stream has started, stop it if we don't have focus.
+                if (mAudioFocus == AudioManager.AUDIOFOCUS_NONE) {
+                    requestAudioFocus();
+                }
                 break;
 
             case SRC_PAUSE:
@@ -175,6 +188,10 @@ public class A2dpSinkStreamHandler extends Handler {
 
             case REQUEST_FOCUS:
                 requestAudioFocusIfNone();
+                break;
+
+            case RELEASE_FOCUS:
+                abandonAudioFocus();
                 break;
 
             case DISCONNECT:
@@ -246,6 +263,7 @@ public class A2dpSinkStreamHandler extends Handler {
     private void requestAudioFocusIfNone() {
         if (DBG) Log.d(TAG, "requestAudioFocusIfNone()");
         if (mAudioFocus == AudioManager.AUDIOFOCUS_NONE) {
+            Log.d(TAG, " mAudioFocus =  " + mAudioFocus);
             requestAudioFocus();
         }
         // On the off change mMediaPlayer errors out and dies, we want to make sure we retry this.
@@ -254,20 +272,24 @@ public class A2dpSinkStreamHandler extends Handler {
     }
 
     private synchronized int requestAudioFocus() {
-        if (DBG) Log.d(TAG, "requestAudioFocus()");
         // Bluetooth A2DP may carry Music, Audio Books, Navigation, or other sounds so mark content
         // type unknown.
+        Log.d(TAG, " requestAudioFocus() ");
         AudioAttributes streamAttributes =
                 new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN)
                         .build();
-        // Bluetooth ducking is handled at the native layer at the request of AudioManager.
+        // Bluetooth ducking is handled at the native layer so tell the Audio Manger to notify the
+        // focus change listener via .setWillPauseWhenDucked().
         AudioFocusRequest focusRequest =
                 new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(
                         streamAttributes)
+                        .setWillPauseWhenDucked(true)
                         .setOnAudioFocusChangeListener(mAudioFocusListener, this)
                         .build();
         int focusRequestStatus = mAudioManager.requestAudioFocus(focusRequest);
+        Log.d(TAG, " focusRequestStatus =  " + focusRequestStatus +
+                                 " focusRequest: " + focusRequest);
         // If the request is granted begin streaming immediately and schedule an upgrade.
         if (focusRequestStatus == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             startFluorideStreaming();
@@ -311,11 +333,22 @@ public class A2dpSinkStreamHandler extends Handler {
     }
 
     private synchronized void abandonAudioFocus() {
-        if (DBG) Log.d(TAG, "abandonAudioFocus()");
         stopFluorideStreaming();
-        releaseMediaKeyFocus();
-        mAudioManager.abandonAudioFocus(mAudioFocusListener);
-        mAudioFocus = AudioManager.AUDIOFOCUS_NONE;
+        if (mAudioFocus != AudioManager.AUDIOFOCUS_NONE) {
+            Log.d(TAG, "abandoning audio focus");
+            AudioAttributes streamAttributes =
+                  new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                          .setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN)
+                          .build();
+            AudioFocusRequest mfocusRequest =
+                  new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(
+                          streamAttributes)
+                          .setWillPauseWhenDucked(true)
+                          .setOnAudioFocusChangeListener(mAudioFocusListener, this)
+                          .build();
+            mAudioManager.abandonAudioFocusRequest(mfocusRequest);
+            mAudioFocus = AudioManager.AUDIOFOCUS_NONE;
+        }
     }
 
     /**

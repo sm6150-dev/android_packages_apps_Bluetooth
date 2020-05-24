@@ -32,6 +32,7 @@
 
 package com.android.bluetooth.opp;
 
+import android.bluetooth.BluetoothAdapter;
 import android.content.ContentValues;
 import android.content.Context;
 import android.net.Uri;
@@ -80,12 +81,15 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
 
     private int mNumFilesAttemptedToSend;
 
+    private BluetoothAdapter mAdapter;
+
     public BluetoothOppObexClientSession(Context context, ObexTransport transport) {
         if (transport == null) {
             throw new NullPointerException("transport is null");
         }
         mContext = context;
         mTransport = transport;
+        mAdapter = BluetoothAdapter.getDefaultAdapter();
     }
 
     @Override
@@ -99,7 +103,7 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
     }
 
     @Override
-    public void stop() {
+    public synchronized void stop() {
         if (D) {
             Log.d(TAG, "Stop!");
         }
@@ -110,7 +114,23 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
                 if (V) {
                     Log.v(TAG, "waiting for thread to terminate");
                 }
-                mThread.join();
+                if (mAdapter.getState() == BluetoothAdapter.STATE_TURNING_OFF) {
+                    Log.d(TAG, "stop, bt is turning off");
+                    mThread.join(1500);
+                    if (mThread.isAlive()) {
+                        Log.d(TAG, "stop, close the transport");
+                        mThread.interrupt();
+                        try {
+                            mTransport.close();
+                        } catch (IOException e) {
+                            Log.e(TAG, "mTransport.close error");
+                        }
+                        Log.d(TAG, "stop, close the transport, done");
+                        mThread.join();
+                    }
+                } else {
+                    mThread.join();
+                }
                 mThread = null;
             } catch (InterruptedException e) {
                 if (V) {
@@ -490,7 +510,7 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
 
                         if (responseCode == ResponseCodes.OBEX_HTTP_CONTINUE
                                 || responseCode == ResponseCodes.OBEX_HTTP_OK) {
-                            if (V) {
+                            if (D) {
                                 Log.v(TAG, "Remote accept");
                             }
                             okToProceed = true;
@@ -503,7 +523,7 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
                             Log.i(TAG, "Remote reject, Response code is " + responseCode);
                         }
                     }
-
+                    long beginTime = System.currentTimeMillis();
                     while (!mInterrupted && okToProceed && (position < fileInfo.mLength)) {
                         if (V) {
                             timestamp = SystemClock.elapsedRealtime();
@@ -556,6 +576,7 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
                         Log.i(TAG,
                                 "SendFile finished send out file " + fileInfo.mFileName + " length "
                                         + fileInfo.mLength);
+                        BTOppUtils.throughputInKbps(fileInfo.mLength, beginTime);
                     } else {
                         error = true;
                         status = BluetoothShare.STATUS_CANCELED;
@@ -586,7 +607,7 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
                     if (!error) {
                         responseCode = putOperation.getResponseCode();
                         if (responseCode != -1) {
-                            if (V) {
+                            if (D) {
                                 Log.v(TAG, "Get response code " + responseCode);
                             }
                             if (responseCode != ResponseCodes.OBEX_HTTP_OK) {
@@ -643,7 +664,7 @@ public class BluetoothOppObexClientSession implements BluetoothOppObexSession {
             super.interrupt();
             synchronized (this) {
                 if (mWaitingForRemote) {
-                    if (V) {
+                    if (D) {
                         Log.v(TAG, "Interrupted when waitingForRemote");
                     }
                     try {

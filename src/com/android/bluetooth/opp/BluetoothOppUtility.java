@@ -43,6 +43,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.database.Cursor;
+import android.database.SQLException;
 import android.net.Uri;
 import android.os.Environment;
 import android.os.SystemProperties;
@@ -80,17 +81,22 @@ public class BluetoothOppUtility {
 
     public static BluetoothOppTransferInfo queryRecord(Context context, Uri uri) {
         BluetoothOppTransferInfo info = new BluetoothOppTransferInfo();
-        Cursor cursor = context.getContentResolver().query(uri, null, null, null, null);
-        if (cursor != null) {
-            if (cursor.moveToFirst()) {
-                fillRecord(context, cursor, info);
+        try {
+            Cursor cursor = context.getContentResolver().query(uri, null, null, null, null);
+            if (cursor != null) {
+                if (cursor.moveToFirst()) {
+                    fillRecord(context, cursor, info);
+                }
+                cursor.close();
+            } else {
+                info = null;
+                if (V) {
+                    Log.v(TAG, "BluetoothOppManager Error: not got data from db for uri:" + uri);
+                }
             }
-            cursor.close();
-        } else {
+        } catch (SQLException | NullPointerException e) {
             info = null;
-            if (V) {
-                Log.v(TAG, "BluetoothOppManager Error: not got data from db for uri:" + uri);
-            }
+            Log.e(TAG, "queryRecord Error: ", e);
         }
         return info;
     }
@@ -208,8 +214,14 @@ public class BluetoothOppUtility {
             return;
         }
 
-        Uri path = BluetoothOppFileProvider.getUriForFile(context,
-                "com.android.bluetooth.opp.fileprovider", f);
+        Uri path = null;
+        try {
+            path = BluetoothOppFileProvider.getUriForFile(context,
+                    "com.android.bluetooth.opp.fileprovider", f);
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, "Not able to find root path:" + f.getAbsolutePath());
+        }
+
         if (path == null) {
             Log.w(TAG, "Cannot get content URI for the shared file");
             return;

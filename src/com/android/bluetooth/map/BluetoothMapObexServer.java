@@ -32,6 +32,7 @@ import android.util.Log;
 import com.android.bluetooth.SignedLongLong;
 import com.android.bluetooth.map.BluetoothMapUtils.TYPE;
 import com.android.bluetooth.mapapi.BluetoothMapContract;
+import com.android.bluetooth.mapapi.BluetoothMapEmailContract;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -156,12 +157,17 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
             }
             mProviderClient = acquireUnstableContentProviderOrThrow();
         }
+        if (account != null && account.getType() == TYPE.EMAIL) {
+            mOutContent = new BluetoothMapContentEmail(mContext, mAccount, mMasInstance);
+        } else {
+            mOutContent = new BluetoothMapContent(mContext, mAccount, mMasInstance);
+        }
 
         buildFolderStructure(); /* Build the default folder structure, and set
                                    mCurrentFolder to root folder */
         mObserver.setFolderStructure(mCurrentFolder.getRoot());
 
-        mOutContent = new BluetoothMapContent(mContext, mAccount, mMasInstance);
+
 
     }
 
@@ -214,12 +220,12 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
         if (mEnableSmsMms) {
             addSmsMmsFolders(tmpFolder);
         }
-        if (hasEmail) {
-            if (D) {
-                Log.d(TAG, "buildFolderStructure(): " + mEmailFolderUri.toString());
-            }
-            addEmailFolders(tmpFolder);
+
+        if (hasEmail && (mOutContent instanceof BluetoothMapContentEmail)) {
+            if (D) Log.d(TAG, "buildFolderStructure(): " + mEmailFolderUri.toString());
+            ((BluetoothMapContentEmail)mOutContent).addEmailFolders(tmpFolder);
         }
+
         if (hasIM) {
             addImFolders(tmpFolder);
         }
@@ -319,11 +325,13 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
     }
 
     public void setRemoteFeatureMask(int mRemoteFeatureMask) {
-        if (D) {
-            Log.d(TAG, "setRemoteFeatureMask() " + Integer.toHexString(mRemoteFeatureMask));
-        }
         this.mRemoteFeatureMask = mRemoteFeatureMask;
         this.mOutContent.setRemoteFeatureMask(mRemoteFeatureMask);
+        if ((mRemoteFeatureMask & BluetoothMapUtils.MAP_FEATURE_MESSAGE_FORMAT_V11_BIT)
+                == BluetoothMapUtils.MAP_FEATURE_MESSAGE_FORMAT_V11_BIT) {
+            mMessageVersion = BluetoothMapUtils.MAP_V11_STR;
+        }
+        if (D) Log.d(TAG," setRemoteFeatureMask mMessageVersion :" + mMessageVersion);
     }
 
     @Override
@@ -396,8 +404,8 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
             mMessageVersion = BluetoothMapUtils.MAP_V11_STR;
         }
 
-        if (V) {
-            Log.v(TAG, "onConnect(): uuid is ok, will send out " + "MSG_SESSION_ESTABLISHED msg.");
+        if (D) {
+            Log.d(TAG, "onConnect(): uuid is ok mMessageVersion :" + mMessageVersion);
         }
 
         if (mCallback != null) {
@@ -473,6 +481,11 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
             if (type.equals(TYPE_MESSAGE_UPDATE)) {
                 if (V) {
                     Log.d(TAG, "TYPE_MESSAGE_UPDATE:");
+                }
+                if (mAccount!= null && mAccount.getType() == TYPE.EMAIL &&
+                        (mOutContent instanceof BluetoothMapContentEmail)) {
+                    ((BluetoothMapContentEmail)mOutContent).msgUpdate();
+                     return ResponseCodes.OBEX_HTTP_OK;
                 }
                 return updateInbox();
             } else if (type.equals(TYPE_SET_NOTIFICATION_REGISTRATION)) {
@@ -660,7 +673,8 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
                 folderName = folderElement.getName();
             }
             if (!folderName.equalsIgnoreCase(BluetoothMapContract.FOLDER_NAME_OUTBOX) && !folderName
-                    .equalsIgnoreCase(BluetoothMapContract.FOLDER_NAME_DRAFT)) {
+                    .equalsIgnoreCase(BluetoothMapContract.FOLDER_NAME_DRAFT)  &&
+                    !folderName.equalsIgnoreCase(BluetoothMapEmailContract.FOLDER_NAME_DRAFTS)) {
                 if (D) {
                     Log.d(TAG, "pushMessage: Is only allowed to outbox and draft. " + "folderName="
                             + folderName);
@@ -783,6 +797,7 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
 
         long handle;
         BluetoothMapUtils.TYPE msgType;
+        if (D) Log.d(TAG, "setMessageStatus():");
 
         if (msgHandle == null) {
             return ResponseCodes.OBEX_HTTP_PRECON_FAILED;
@@ -948,10 +963,16 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
                 mCurrentFolder = mCurrentFolder.getRoot();
             }
         } else {
+            if (mAccount!= null && mAccount.getType() == TYPE.EMAIL) {
+                if (folderName.equalsIgnoreCase(BluetoothMapContract.FOLDER_NAME_DRAFT)) {
+                    folderName = BluetoothMapEmailContract.FOLDER_NAME_DRAFTS;
+                }
+            }
             folder = mCurrentFolder.getSubFolder(folderName);
             if (folder != null) {
                 mCurrentFolder = folder;
             } else {
+                Log.w(TAG,"SubFolder Not found! : " + mCurrentFolder.getName());
                 return ResponseCodes.OBEX_HTTP_BAD_REQUEST;
             }
         }
@@ -974,7 +995,7 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
 
         }
         if (mProviderClient != null) {
-            mProviderClient.release();
+            mProviderClient.close();
             mProviderClient = null;
         }
 
@@ -1519,8 +1540,20 @@ public class BluetoothMapObexServer extends ServerRequestHandler {
             if (maxListCount == BluetoothMapAppParams.INVALID_VALUE_PARAMETER) {
                 maxListCount = 1024;
             }
-
-            if (maxListCount != 0) {
+            try {
+                if ( (mAccount != null && mAccount.getType() == TYPE.EMAIL) &&
+                    (mOutContent instanceof BluetoothMapContentEmail) &&
+                        !mCurrentFolder.getName().equals("telecom") &&
+                            !mCurrentFolder.getName().equals("root")) {
+                    if (D) Log.d(TAG, "RefreshFolderStructure(): " +  mCurrentFolder.getName());
+                    ((BluetoothMapContentEmail)mOutContent).addEmailFolders(mCurrentFolder);
+                }
+            } catch( RemoteException e1) {
+                Log.v(TAG,"sendFolderList Refresh failed : Go with existing for :"
+                    + mCurrentFolder.getName());
+            }
+            if(maxListCount != 0)
+            {
                 outBytes = mCurrentFolder.encode(listStartOffset, maxListCount);
             } else {
                 // ESR08 specified that this shall only be included for MaxListCount=0
